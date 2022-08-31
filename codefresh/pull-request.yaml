@@ -1,0 +1,120 @@
+version: "1.0"
+
+
+stages:
+  - Prepare
+  - Build
+  - Test
+
+steps:
+  validate:
+    title: "Validate"
+    description: "Ensure build parameters are present"
+    stage: Prepare
+    image: cloudposse/geodesic:0.122.4
+    entry_point: /etc/codefresh/require_vars
+    cmd:
+      - |-
+        ${{GITHUB_REPO_STATUS_TOKEN}} Personal Access Token used to give scripts
+        permission to update the "status check" status on GitHub pull requests
+      - ${{SLACK_WEBHOOK_URL}} Secret URL used by scripts to send updates to a Slack channel
+      - |-
+        ${{AWS_DOCKER_REPO_HOST}} The host hame portion of the ECR Docker repo to use.
+        Typically something like 123456789012.dkr.ecr.us-east-1.amazonaws.com
+      - |-
+        ${{CF_PULL_REQUEST_NUMBER}} The PR number from GitHub.
+        The PR number is only set if this build was triggered in relation to a PR.
+        Requiring this to be present means requiring this pipeline to only work with PRs.
+      - ${{AWS_ENV_NAME}} The full name of the AWS environment to deploy to, e.g. prod.spoton.sh
+      - ${{BASE_HOST}} The subdomain below which to start attaching new host names
+      - ${{KOPS_CLUSTER_NAME}} The name of the kops cluster to operate on, as known to kops
+      - ${{KUBE_CONTEXT}} The name of the Codefresh Kubernetes integration to use for authentication
+      - |-
+        ${{GIT_PROVIDER}} The name of the Codefresh Git integration to use
+        when cloning Git repositories.
+      - |-
+        ${{KUBERNETES_DOCKER_REGISTRY}} The name of the Codefresh Kubernetes Docker integration to use
+        when pushing images for use on Kubernetes.
+      - |-
+        ${{TOOL_DOCKER_REPO_PREFIX}} The first part of the full name from which
+        to pull the Docker image of the AWS tools image for a given AWS environment.
+        For example "r.cfcr.io/spoton", to combine with AWS_ENV_NAME to give the full
+        name of the tool image to use, such as "r.cfcr.io/spoton/staging.spoton.sh".
+      - |-
+        ${{BUILD_HARNESS_VERSION}} The version of the cloudposse/build-harness image to use
+        to send notifications to Slack.
+  export:
+    title: Export Environment
+    stage: Prepare
+    image: alpine
+    commands:
+      - >-
+        { [[ -z $DOCKER_DEV_SUFFIX ]] || [[ $DOCKER_DEV_SUFFIX = "-dev" ]]; }  ||
+        (echo "* Unexpected value for DOCKER_DEV_SUFFIX: \"$DOCKER_DEV_SUFFIX\".
+        Should be empty or \"--dev\""; exit 36)
+      # Ensure an empty DOCKER_DEV_SUFFIX is available to the steps
+      # if it is not otherwise set
+      - export DOCKER_DEV_SUFFIX
+      - export APP_SCHEME=${APP_SCHEME:-https}
+      - export RELEASE_NAMESPACE="pr-${CF_PULL_REQUEST_NUMBER}-${CF_REPO_NAME}"
+      - export RELEASE_NAME=$RELEASE_NAMESPACE
+      - export PORTAL_GROUP=Unlimited
+      # If the branch name contains a slash (/), then everything before the first slash
+      # is used as the namespace, to allow deploying multiple projects to the same ns.
+      - >-
+        [[ "${CF_BRANCH}" = "${CF_BRANCH%%/*}" ]]
+        || { RELEASE_NAMESPACE="${CF_BRANCH%%/*}"; PORTAL_GROUP=$RELEASE_NAMESPACE
+        RELEASE_NAME="${RELEASE_NAMESPACE}-${CF_REPO_NAME}"; }
+      - cf_export DOCKER_DEV_SUFFIX APP_SCHEME RELEASE_NAMESPACE RELEASE_NAME PORTAL_GROUP
+      - cf_export GIT_BRANCH=${{CF_BRANCH}}
+      - cf_export PROJECT=${{CF_REPO_NAME}}
+      - cf_export APP_NAME=${{CF_REPO_NAME}}
+      - cf_export APP_IAM_ROLE=${{CF_REPO_NAME}}-role
+      - cf_export FLAVOR=unlimited
+      - cf_export CHART_NAME=${{CF_REPO_NAME}}
+      - cf_export PIPELINE_ENV=unlimited-staging
+      - cf_export KOPS_CLUSTER_NAME=${{KOPS_CLUSTER_NAME}}
+      - cf_export APP_HOST_DOMAIN="${RELEASE_NAME}.${{BASE_HOST}}"
+      - cf_export IMAGE_NAME=${{AWS_DOCKER_REPO_HOST}}/${{CF_REPO_NAME}}${DOCKER_DEV_SUFFIX}
+      - cf_export IMAGE_TAG=${{CF_SHORT_REVISION}}
+
+  main_clone:
+    title: "Clone repository"
+    type: git-clone
+    stage: Prepare
+    description: "Initialize"
+    repo: ${{CF_REPO_OWNER}}/${{CF_REPO_NAME}}
+    git: ${{GIT_PROVIDER}}
+    revision: ${{CF_REVISION}}
+
+  build:
+    title: Build python3.9 image
+    type: build
+    description: Build app
+    image_name: ${{CF_REPO_NAME}}
+    tag: ${{CF_SHORT_REVISION}}-3.9
+    dockerfile: Dockerfile
+    no_cache: false
+    no_cf_cache: false
+    disable_push: true
+    build_arguments:
+      - BUILD_COMMIT_SHA=${{CF_SHORT_REVISION}}
+      - VERSION=3.9
+
+  test:
+    title: "Run tests"
+    stage: Test
+    type: parallel
+    # Run tests against the composition
+    steps:
+      unit_tests:
+        title: "Run python3.9 unit tests"
+        image: ${{build}}
+        environment:
+          - RELEASE_TAG=0.0.0
+        commands:
+          - poetry run pytest
+    when:
+      condition:
+        all:
+          testsEnabled: "match('${{CF_PULL_REQUEST_LABELS}}', 'no tests', false) == false"

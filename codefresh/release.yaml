@@ -1,0 +1,104 @@
+version: "1.0"
+
+stages:
+  - Prepare
+  - Build
+  - Package
+  - Release
+
+steps:
+  validate:
+    title: "Validate: parameters present"
+    description: "Ensure build parameters are present"
+    stage: Prepare
+    image: cloudposse/geodesic:0.122.4
+    entry_point: /etc/codefresh/require_vars
+    cmd:
+      #  ${{DOCKER_DEV_SUFFIX}} is optional. If present, it will be added to the end
+      #  of the image name for non-production images, ensuring that production and
+      #  non-production Docker images are stored in different repos.
+      - |-
+        ${{AWS_DOCKER_REPO_HOST}} The host hame portion of the ECR Docker repo to use.
+        Typically something like 123456789012.dkr.ecr.us-east-1.amazonaws.com
+      - |-
+        ${{KUBERNETES_DOCKER_REGISTRY}} The name of the Codefresh Kubernetes Docker integration to use
+        when pushing images for use on Kubernetes.
+      - ${{CF_RELEASE_TAG}} The release tag from GitHub. This pipeline should only be run on releases.
+      - ${{CF_REPO_OWNER}}
+      - ${{CF_REPO_NAME}}
+      - ${{CF_REVISION}}
+      - ${{CF_SHORT_REVISION}}
+      - ${{CF_COMMIT_URL}}
+      - ${{CF_COMMIT_MESSAGE}}
+      - ${{CF_COMMIT_AUTHOR}}
+      - ${{CF_BRANCH}}
+      - ${{CODEFRESH_AWS_ACCESS_KEY_ID}}
+      - ${{CODEFRESH_AWS_SECRET_ACCESS_KEY}}
+
+  export:
+    title: "Create Context"
+    stage: "Prepare"
+    image: alpine
+    commands:
+      # Extract the postfix of a semver (e.g. 0.0.0-flavor+metadata => flavor)
+      - suffix=$(echo " " "${CF_RELEASE_TAG}" |sed -E 's/^[^-+]+-?([^+]*)(\+.*)?$/\1/')
+      - >-
+        { [[ -z $DOCKER_DEV_SUFFIX ]] || [[ $DOCKER_DEV_SUFFIX = "-dev" ]]; }  ||
+        (echo "* Unexpected value for DOCKER_DEV_SUFFIX: \"$DOCKER_DEV_SUFFIX\".
+        Should be empty or \"--dev\""; exit 36)
+      # Figure out if we are pulling from or pushing to an alternate Docker repo
+      - 'export DOCKER_PULL_SUFFIX="${DOCKER_DEV_SUFFIX}"'
+      - 'export DOCKER_PUSH_SUFFIX="${DOCKER_DEV_SUFFIX}"'
+      - export NORMALIZED_RELEASE_TAG="${CF_RELEASE_TAG%%\+*}"
+      - cf_export DOCKER_PULL_SUFFIX DOCKER_PUSH_SUFFIX NORMALIZED_RELEASE_TAG
+      - cf_export SOURCE_IMAGE="${AWS_DOCKER_REPO_HOST}/${CF_REPO_NAME}${DOCKER_PULL_SUFFIX}:${CF_REVISION}"
+      - cf_export PUSH_IMAGE_NAME="${CF_REPO_NAME}${DOCKER_PUSH_SUFFIX}"
+      - cf_export IMAGE_NAME="${AWS_DOCKER_REPO_HOST}/${CF_REPO_NAME}${DOCKER_PUSH_SUFFIX}"
+      - cf_export IMAGE_TAG="${CF_REVISION}"
+      - cf_export AWS_ACCESS_KEY_ID="${CODEFRESH_AWS_ACCESS_KEY_ID}"
+      - cf_export AWS_SECRET_ACCESS_KEY="${CODEFRESH_AWS_SECRET_ACCESS_KEY}"
+      - echo branch $CF_BRANCH
+      - echo release tag $CF_RELEASE_TAG
+      - echo CF_COMMIT_MESSAGE is \"${CF_COMMIT_MESSAGE}\"
+
+  main_clone:
+    title: "Clone repository"
+    type: git-clone
+    stage: Prepare
+    description: "Initialize"
+    repo: ${{CF_REPO_OWNER}}/${{CF_REPO_NAME}}
+    git: ${{GIT_PROVIDER}}
+    revision: ${{CF_REVISION}}
+
+  build_image:
+    title: Build image
+    stage: Build
+    type: build
+    description: Build image
+    dockerfile: Dockerfile
+    image_name: ${{CF_REPO_NAME}}${{DOCKER_DEV_SUFFIX}}
+    disable_push: true
+    build_arguments:
+      - BUILD_COMMIT_SHA=${{CF_SHORT_REVISION}}
+
+  s3pypi:
+    title: s3pypi release
+    stage: Release
+    description: Upload release to s3 bucket
+    image: ${{build_image}}
+    commands:
+      - export RELEASE_TAG=${{CF_RELEASE_TAG}}
+      - python setup.py sdist bdist_wheel
+      - s3pypi --bucket spoton-pip --secret ${{S3PYPI_SECRET}} --dist-path ./dist --verbose
+
+  upload_assets:
+    title: Upload assets
+    type: github-release
+    stage: Release
+    description: Upload assets to GitHub release
+    arguments:
+      release_name: ${{CF_RELEASE_NAME}}
+      release_tag: ${{CF_RELEASE_TAG}}
+      files:
+        - '${{CF_VOLUME_PATH}}/${{CF_REPO_NAME}}/dist/gusto-${{CF_RELEASE_TAG}}.tar.gz'
+        - '${{CF_VOLUME_PATH}}/${{CF_REPO_NAME}}/dist/gusto-${{CF_RELEASE_TAG}}-py3-none-any.whl'
