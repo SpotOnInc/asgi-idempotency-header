@@ -1,3 +1,7 @@
+# ARCHIVE INFORMATION
+> [!IMPORTANT]
+> Due to lack of usage and maintenance, this repository has been archived.  
+> Please read the [repository archival FAQ](https://docs.corp.spoton.sh/developer/undocumented-repositories-archival-faq/) for more information!
 [![tests](https://github.com/sondrelg/asgi-idempotency-header/actions/workflows/test.yml/badge.svg)](https://github.com/sondrelg/asgi-idempotency-header/actions/workflows/test.yml)
 [![pypi](https://img.shields.io/pypi/v/asgi-idempotency-header.svg)](https://pypi.org/project/drf-openapi-tester/)
 [![python-versions](https://img.shields.io/badge/python-3.8%2B-blue)](https://pypi.org/project/asgi-idempotency-header)
